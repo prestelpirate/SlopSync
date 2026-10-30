@@ -281,16 +281,28 @@ static char *rec_match_key(const Kind *k, const Rec *r)
    return key;
 }
 
-/* A stricter key for spotting a second copy of a record: two events or
- * to-dos only count as duplicates when everything the user sees matches,
- * so a recurring "Call bank" to-do with another due date is kept. */
+/* A stricter key for spotting a second copy of a record: records only
+ * count as duplicates when every field the user can see matches, so a
+ * recurring "Call bank" to-do with another due date, or a contact with
+ * the same name but another phone number, is kept. */
 static char *rec_dup_key(const Kind *k, const Rec *r)
 {
    char *base = rec_match_key(k, r), *s, *key;
+   GString *g;
+   int i;
 
    switch (k->kind) {
     case RS_KIND_EVENT:
-      s = g_strdup_printf("%s|%04d%02d%02d%02d%02d|%d/%d/%d|%04d%02d%02d|%s", base,
+      g = g_string_new(NULL);
+      g_string_append_printf(g, "|%d/%d/%d|%s", r->ev.alarm, r->ev.advance,
+                             r->ev.advanceUnits, r->ev.location ? r->ev.location : "");
+      for (i = 0; i < 7; i++)
+         g_string_append_printf(g, "%d", r->ev.repeatDays[i]);
+      g_string_append_printf(g, "|%d", (int)r->ev.repeatDay);
+      for (i = 0; i < r->ev.exceptions; i++)
+         g_string_append_printf(g, "|x%04d%02d%02d", r->ev.exception[i].tm_year,
+                                r->ev.exception[i].tm_mon, r->ev.exception[i].tm_mday);
+      s = g_strdup_printf("%s|%04d%02d%02d%02d%02d|%d/%d/%d|%04d%02d%02d|%s%s", base,
                           r->ev.end.tm_year, r->ev.end.tm_mon, r->ev.end.tm_mday,
                           r->ev.event ? 0 : r->ev.end.tm_hour,
                           r->ev.event ? 0 : r->ev.end.tm_min,
@@ -298,7 +310,8 @@ static char *rec_dup_key(const Kind *k, const Rec *r)
                           r->ev.repeatForever ? 0 : r->ev.repeatEnd.tm_year,
                           r->ev.repeatForever ? 0 : r->ev.repeatEnd.tm_mon,
                           r->ev.repeatForever ? 0 : r->ev.repeatEnd.tm_mday,
-                          r->ev.note ? r->ev.note : "");
+                          r->ev.note ? r->ev.note : "", g->str);
+      g_string_free(g, TRUE);
       break;
     case RS_KIND_TODO:
       s = g_strdup_printf("%s|%d|%04d%02d%02d|%d|%s", base, r->td.indefinite,
@@ -308,7 +321,23 @@ static char *rec_dup_key(const Kind *k, const Rec *r)
                           r->td.complete, r->td.note ? r->td.note : "");
       break;
     default:
-      return base;
+      g = g_string_new(base);
+      for (i = 0; i < NUM_CONTACT_ENTRIES; i++)
+         g_string_append_printf(g, "|%s", r->c.entry[i] ? r->c.entry[i] : "");
+      for (i = 0; i < 7; i++)
+         g_string_append_printf(g, "|p%d", r->c.phoneLabel[i]);
+      for (i = 0; i < 3; i++)
+         g_string_append_printf(g, "|a%d", r->c.addressLabel[i]);
+      for (i = 0; i < 2; i++)
+         g_string_append_printf(g, "|i%d", r->c.IMLabel[i]);
+      g_string_append_printf(g, "|%d|%d", r->c.showPhone, r->c.birthdayFlag);
+      if (r->c.birthdayFlag)
+         g_string_append_printf(g, "|%04d%02d%02d|%d/%d/%d", r->c.birthday.tm_year,
+                                r->c.birthday.tm_mon, r->c.birthday.tm_mday,
+                                r->c.reminder, r->c.advance, r->c.advanceUnits);
+      g_string_append_printf(g, "|pic%d", r->c.picture ? (int)r->c.picture->length : 0);
+      s = g_string_free(g, FALSE);
+      break;
    }
    g_free(base);
    key = g_utf8_casefold(s, -1);

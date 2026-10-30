@@ -47,7 +47,8 @@ static buf_rec *br_dup(const buf_rec *b)
 int stub_seed_from_pdb(const char *path, const char *name)
 {
    pi_file_t *pf = pi_file_open(path);
-   int n = 0, i, nrec = 0, size, attr, cat;
+   int n = 0, i, nrec = 0, attr, cat;
+   size_t size;
    void *buf, *ai;
    size_t ailen;
    recordid_t uid;
@@ -57,7 +58,7 @@ int stub_seed_from_pdb(const char *path, const char *name)
    pi_file_get_entries(pf, &nrec);
    for (i = 0; i < nrec; i++) {
       buf_rec b;
-      if (pi_file_read_record(pf, i, &buf, (size_t *)&size, &attr, &cat, &uid) < 0)
+      if (pi_file_read_record(pf, i, &buf, &size, &attr, &cat, &uid) < 0)
          continue;
       if (attr & 0x80)
          continue;
