@@ -28,6 +28,8 @@
 #define PREF_TODO_VERSION 88
 
 extern int get_pref(int which, long *n, const char **string);
+/* set when J-Pilot runs with -S/--sqlite; weak so older builds still load */
+extern int glob_sqlite __attribute__((weak));
 extern void jp_charset_j2p(char *buf, int max_len);
 extern char *jp_charset_p2newj(const char *buf, int max_len);
 extern int jp_unpack_Contact(struct Contact *, pi_buffer_t *);
@@ -1234,6 +1236,13 @@ int rs_sync_all(const RsSettings *s)
 
    if (!s->url || !*s->url) {
       rs_log("No Radicale address configured - open the settings first");
+      return 1;
+   }
+   if (&glob_sqlite && glob_sqlite) {
+      /* J-Pilot then keeps its data in SQLite, not in the .pdb/.pc3 files
+       * the plugin API reads and writes */
+      rs_log("J-Pilot is running with SQLite storage (-S); Radicale Sync only "
+             "works with the standard file storage. Nothing was synced.");
       return 1;
    }
    get_pref(PREF_DATEBOOK_VERSION, &dv, NULL);
