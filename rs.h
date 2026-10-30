@@ -28,6 +28,7 @@ typedef struct {
    gboolean after_hotsync;
    gboolean insecure_tls;
    RsConflict conflict;
+   int past_days;        /* sync events that ended at most this many days ago */
 } RsSettings;
 
 void rs_settings_load(RsSettings *s);

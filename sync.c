@@ -465,6 +465,7 @@ typedef struct {
    buf_rec *br;
    char *hash;
    gboolean linked;
+   gboolean old;            /* event outside the past-days window */
 } Local;
 
 static char *record_hash(const void *buf, int size, unsigned char attrib)
@@ -500,6 +501,7 @@ typedef struct {
    GHashTable *remote;       /* href -> etag */
    GHashTable *fetched;      /* href -> data */
    GList *state;
+   time_t cutoff;            /* events: ignore those ending before this; 0 = all */
    int n_up, n_down, n_del_local, n_del_remote, n_conflict, n_err;
 } Ctx;
 
@@ -530,8 +532,27 @@ static gboolean fetch_etags(Ctx *c)
       "<D:propfind xmlns:D=\"DAV:\"><D:prop><D:getetag/><D:resourcetype/>"
       "</D:prop></D:propfind>";
    const char *hdrs[] = { "Depth: 1", "Content-Type: application/xml; charset=utf-8", NULL };
-   RsResponse *r = rs_http(c->s, "PROPFIND", c->coll_url, hdrs, body);
+   RsResponse *r;
    GList *items, *l;
+
+   if (c->cutoff) {
+      /* only events that end on or after the cutoff (recurrences expanded
+       * by the server) */
+      char stamp[32];
+      char *q;
+      strftime(stamp, sizeof(stamp), "%Y%m%dT%H%M%SZ", gmtime(&c->cutoff));
+      q = g_strdup_printf(
+         "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+         "<C:calendar-query xmlns:D=\"DAV:\" xmlns:C=\"urn:ietf:params:xml:ns:caldav\">"
+         "<D:prop><D:getetag/><D:resourcetype/></D:prop>"
+         "<C:filter><C:comp-filter name=\"VCALENDAR\"><C:comp-filter name=\"VEVENT\">"
+         "<C:time-range start=\"%s\"/>"
+         "</C:comp-filter></C:comp-filter></C:filter></C:calendar-query>", stamp);
+      r = rs_http(c->s, "REPORT", c->coll_url, hdrs, q);
+      g_free(q);
+   } else {
+      r = rs_http(c->s, "PROPFIND", c->coll_url, hdrs, body);
+   }
 
    if (r->status != 207) {
       if (r->status == 404)
@@ -822,6 +843,79 @@ static gboolean remote_has_component(Ctx *c, const char *data)
 
 /* ---------- one collection ---------- */
 
+/* ---------- past-events window ---------- */
+
+/* Midnight today minus 'days' days, local time */
+static time_t window_start(int days)
+{
+   GDateTime *now = g_date_time_new_now_local();
+   GDateTime *mid = g_date_time_new_local(g_date_time_get_year(now),
+                                          g_date_time_get_month(now),
+                                          g_date_time_get_day_of_month(now), 0, 0, 0);
+   GDateTime *start = g_date_time_add_days(mid, -days);
+   time_t t = (time_t)g_date_time_to_unix(start);
+   g_date_time_unref(start);
+   g_date_time_unref(mid);
+   g_date_time_unref(now);
+   return t;
+}
+
+/* Does the event finish (last occurrence included) before the cutoff? */
+static gboolean event_is_old(const struct CalendarEvent *ev, time_t cutoff)
+{
+   struct tm last;
+   time_t t;
+
+   if (ev->repeatType != calendarRepeatNone) {
+      if (ev->repeatForever)
+         return FALSE;
+      last = ev->repeatEnd;
+   } else {
+      last = ev->end;
+      if (ev->event || mktime(&last) < mktime((struct tm *)&ev->begin))
+         last = ev->begin;
+   }
+   /* compare whole days: an event ending at any time on the cutoff day counts */
+   last.tm_hour = 23;
+   last.tm_min = 59;
+   last.tm_sec = 59;
+   last.tm_isdst = -1;
+   t = mktime(&last);
+   return t != (time_t)-1 && t < cutoff;
+}
+
+static gboolean local_is_old(Ctx *c, const buf_rec *br)
+{
+   Rec r;
+   gboolean old;
+   if (!c->cutoff || rec_unpack(c->k, br, &r) != 0)
+      return FALSE;
+   old = event_is_old(&r.ev, c->cutoff);
+   rec_free(c->k, &r);
+   return old;
+}
+
+static gboolean text_is_old(Ctx *c, const char *text)
+{
+   Rec r;
+   gboolean old = FALSE;
+   if (!c->cutoff || !text)
+      return FALSE;
+   rec_init(c->k, &r);
+   if (rec_from_text(c->k, text, &r, NULL, NULL) == 0)
+      old = event_is_old(&r.ev, c->cutoff);
+   rec_free(c->k, &r);
+   return old;
+}
+
+static gboolean cached_is_old(Ctx *c, const char *href)
+{
+   char *copy = cache_get(c->cache, href);
+   gboolean old = text_is_old(c, copy);
+   g_free(copy);
+   return old;
+}
+
 static int sync_collection(const RsSettings *s, Kind *k, const char *path)
 {
    Ctx c;
@@ -849,8 +943,15 @@ static int sync_collection(const RsSettings *s, Kind *k, const char *path)
    c.fetched = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
    spath = state_path(k, c.coll_url);
    c.state = state_load(spath);
+   if (k->kind == RS_KIND_EVENT)
+      c.cutoff = window_start(s->past_days);
 
    rs_log("%s: syncing with %s", k->label, c.coll_url);
+   if (c.cutoff) {
+      char day[32];
+      strftime(day, sizeof(day), "%Y-%m-%d", localtime(&c.cutoff));
+      rs_log("%s: only events from %s on (%d days back)", k->label, day, s->past_days);
+   }
 
    if (!fetch_etags(&c)) {
       c.n_err++;
@@ -871,14 +972,19 @@ static int sync_collection(const RsSettings *s, Kind *k, const char *path)
       lo = g_new0(Local, 1);
       lo->br = br;
       lo->hash = record_hash(br->buf, br->size, br->attrib);
+      lo->old = local_is_old(&c, br);
       g_hash_table_insert(c.locals, GUINT_TO_POINTER(br->unique_id), lo);
    }
 
    /* Safety: an empty side while we remember many links almost always
     * means a wrong path or a reset database, not mass deletion. */
-   for (l = c.state; l; l = l->next)
-      if (((StateEntry *)l->data)->local_id)
+   for (l = c.state; l; l = l->next) {
+      StateEntry *e = l->data;
+      Local *lo = e->local_id ? g_hash_table_lookup(c.locals, GUINT_TO_POINTER(e->local_id)) : NULL;
+      /* with a window, only links still inside it are expected on the server */
+      if (e->local_id && (!c.cutoff || (lo && !lo->old)))
          mapped++;
+   }
    if (mapped >= 3 && g_hash_table_size(c.remote) == 0) {
       rs_log("%s: the server collection is empty but %d items were synced before. "
              "Not deleting anything - check the collection path, or delete %s to start over.",
@@ -1048,6 +1154,9 @@ static int sync_collection(const RsSettings *s, Kind *k, const char *path)
          } else {
             keep = !delete_remote(&c, e);
          }
+      } else if (!retag && c.cutoff && (lo->old || cached_is_old(&c, e->href))) {
+         /* outside the past-days window, not deleted: leave both copies
+          * alone and keep the link for when the window is widened */
       } else if (!retag) {
          /* deleted on the server */
          if (lchg && prefer_palm) {
@@ -1132,6 +1241,10 @@ static int sync_collection(const RsSettings *s, Kind *k, const char *path)
             c.state = g_list_append(c.state, e);   /* remember, ignore */
             continue;
          }
+         if (text_is_old(&c, data)) {
+            state_entry_free(e);                   /* outside the window */
+            continue;
+         }
          rec_init(k, &r);
          if (rec_from_text(k, data, &r, NULL, NULL) == 0) {
             char *mk = rec_match_key(k, &r);
@@ -1168,7 +1281,7 @@ static int sync_collection(const RsSettings *s, Kind *k, const char *path)
    while (g_hash_table_iter_next(&it, &key, &val)) {
       Local *lo = val;
       StateEntry *e;
-      if (lo->linked)
+      if (lo->linked || lo->old)
          continue;
       e = g_new0(StateEntry, 1);
       e->local_id = lo->br->unique_id;

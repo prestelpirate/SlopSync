@@ -13,6 +13,7 @@
 static GtkWidget *log_view;       /* NULL while the plugin page is not shown */
 static GtkWidget *sync_button;
 static GtkWidget *settings_button;
+static GtkWidget *info_label;
 static gboolean syncing;
 
 /* ---------- logging ---------- */
@@ -48,7 +49,7 @@ typedef struct {
    GtkWidget *url, *user, *pass;
    GtkWidget *cal, *todo, *card;
    GtkWidget *use_cal, *use_todo, *use_card;
-   GtkWidget *conflict, *hotsync, *insecure;
+   GtkWidget *conflict, *hotsync, *insecure, *past_days;
    GtkWidget *status;
 } SettingsUI;
 
@@ -87,6 +88,7 @@ static void read_form(SettingsUI *ui, RsSettings *s)
    s->insecure_tls = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->insecure));
    s->conflict = gtk_combo_box_get_active(GTK_COMBO_BOX(ui->conflict)) == 1
                  ? RS_PREFER_PALM : RS_PREFER_SERVER;
+   s->past_days = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(ui->past_days));
 }
 
 static void fill_combo(GtkWidget *combo, GList *items, const char *want)
@@ -226,6 +228,22 @@ static void open_settings(GtkWidget *parent)
    gtk_grid_attach(GTK_GRID(grid), ui.use_card, 0, row, 1, 1);
    gtk_grid_attach(GTK_GRID(grid), ui.card, 1, row++, 2, 1);
 
+   {
+      GtkWidget *hb = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+      GtkWidget *l = gtk_label_new_with_mnemonic("Sync _past events from the last");
+      ui.past_days = gtk_spin_button_new_with_range(0, 36500, 1);
+      gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui.past_days), s.past_days);
+      gtk_label_set_mnemonic_widget(GTK_LABEL(l), ui.past_days);
+      gtk_box_pack_start(GTK_BOX(hb), l, FALSE, FALSE, 0);
+      gtk_box_pack_start(GTK_BOX(hb), ui.past_days, FALSE, FALSE, 0);
+      gtk_box_pack_start(GTK_BOX(hb), gtk_label_new("days"), FALSE, FALSE, 0);
+      gtk_widget_set_tooltip_text(hb,
+         "Calendar events that ended longer ago are neither sent nor received, "
+         "and are never deleted because of this limit. Current and future "
+         "events, and repeating events without an end, are always synced.");
+      gtk_grid_attach(GTK_GRID(grid), hb, 1, row++, 2, 1);
+   }
+
    frame = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
    gtk_grid_attach(GTK_GRID(grid), frame, 0, row++, 3, 1);
 
@@ -261,9 +279,27 @@ static void open_settings(GtkWidget *parent)
 
 /* ---------- main plugin page ---------- */
 
+static char *info_text(const RsSettings *s)
+{
+   return *s->username
+      ? g_strdup_printf("Server: %s   User: %s   Past events: %d days",
+                        s->url, s->username, s->past_days)
+      : g_strdup("Not configured yet - click Settings.");
+}
+
 static void cb_settings(GtkWidget *w, gpointer data)
 {
+   RsSettings s = { 0 };
+   char *t;
+
    open_settings(w);
+   if (!info_label)
+      return;
+   rs_settings_load(&s);
+   t = info_text(&s);
+   gtk_label_set_text(GTK_LABEL(info_label), t);
+   g_free(t);
+   rs_settings_clear(&s);
 }
 
 static void cb_sync(GtkWidget *w, gpointer data)
@@ -354,10 +390,8 @@ int plugin_gui(GtkWidget *vbox, GtkWidget *hbox, unsigned int unique_id)
    gtk_label_set_xalign(GTK_LABEL(title), 0.0);
    gtk_box_pack_start(GTK_BOX(box), title, FALSE, FALSE, 0);
 
-   where = *s.username
-      ? g_strdup_printf("Server: %s   User: %s", s.url, s.username)
-      : g_strdup("Not configured yet - click Settings.");
-   hint = gtk_label_new(where);
+   where = info_text(&s);
+   hint = info_label = gtk_label_new(where);
    gtk_label_set_xalign(GTK_LABEL(hint), 0.0);
    gtk_box_pack_start(GTK_BOX(box), hint, FALSE, FALSE, 0);
    g_free(where);
@@ -381,8 +415,10 @@ int plugin_gui(GtkWidget *vbox, GtkWidget *hbox, unsigned int unique_id)
    gtk_container_add(GTK_CONTAINER(scroll), log_view);
    gtk_box_pack_start(GTK_BOX(box), scroll, TRUE, TRUE, 0);
 
-   gtk_box_pack_start(GTK_BOX(vbox), box, TRUE, TRUE, 0);
-   gtk_widget_show_all(vbox);
+   /* J-Pilot passes the left-hand list pane as vbox and the main area as
+    * hbox; the whole page belongs in the main area */
+   gtk_box_pack_start(GTK_BOX(hbox), box, TRUE, TRUE, 0);
+   gtk_widget_show_all(hbox);
    rs_settings_clear(&s);
    return EXIT_SUCCESS;
 }
@@ -390,6 +426,7 @@ int plugin_gui(GtkWidget *vbox, GtkWidget *hbox, unsigned int unique_id)
 int plugin_gui_cleanup(void)
 {
    log_view = NULL;
+   info_label = NULL;
    sync_button = NULL;
    settings_button = NULL;
    return EXIT_SUCCESS;

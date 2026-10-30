@@ -355,6 +355,7 @@ int main(int argc, char **argv)
    S.todo_path = g_strdup(P("tasks/"));
    S.card_path = g_strdup(P("contacts/"));
    S.sync_cal = S.sync_todo = S.sync_card = TRUE;
+   S.past_days = 36500;   /* whole history unless a test narrows it */
 
    /* discovery + bad password */
    sync_now("wrong password");
@@ -590,6 +591,57 @@ int main(int argc, char **argv)
       pi_buffer_free(pb);
       pi_buffer_free(out);
       g_free(desc);
+   }
+
+   /* 10b. past-events window */
+   {
+      GDateTime *now = g_date_time_new_now_local();
+      char ics[1024];
+      int lbefore = stub_live_count(CAL), rbefore = remote_count(P("calendar/"));
+      struct { const char *uid, *summary, *rrule; int ago; } ev[] = {
+         { "win-old", "Window old", "", 40 },
+         { "win-recent", "Window recent", "", 3 },
+         { "win-oldrep", "Window old repeat", "RRULE:FREQ=WEEKLY;COUNT=3\r\n", 60 },
+         { "win-foreverrep", "Window forever repeat", "RRULE:FREQ=WEEKLY\r\n", 90 },
+      };
+      unsigned i;
+      for (i = 0; i < G_N_ELEMENTS(ev); i++) {
+         GDateTime *d = g_date_time_add_days(now, -ev[i].ago);
+         char *day = g_date_time_format(d, "%Y%m%d");
+         char *href = g_strdup_printf("%s%s.ics", P("calendar/"), ev[i].uid);
+         g_snprintf(ics, sizeof(ics),
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:test\r\n"
+            "BEGIN:VEVENT\r\nUID:%s\r\nDTSTAMP:20261030T120000Z\r\n"
+            "DTSTART:%sT100000\r\nDTEND:%sT110000\r\n%sSUMMARY:%s\r\n"
+            "END:VEVENT\r\nEND:VCALENDAR\r\n",
+            ev[i].uid, day, day, ev[i].rrule, ev[i].summary);
+         CHECK(remote_put(href, ics, "text/calendar") / 100 == 2, "stored %s", ev[i].uid);
+         g_free(day);
+         g_free(href);
+         g_date_time_unref(d);
+      }
+      g_date_time_unref(now);
+
+      S.past_days = 14;
+      sync_now("14-day window");
+      CHECK(find_event("Window recent", NULL) != NULL, "recent event arrives");
+      CHECK(find_event("Window forever repeat", NULL) != NULL, "endless repeat arrives");
+      CHECK(!find_event("Window old", NULL), "40-day-old event skipped");
+      CHECK(!find_event("Window old repeat", NULL), "ended repeat skipped");
+      CHECK(stub_live_count(CAL) == lbefore + 2, "no local deletions (%d)", stub_live_count(CAL));
+      CHECK(remote_count(P("calendar/")) == rbefore + 4, "no server deletions");
+      sync_now("14-day window again");
+      CHECK(!log_changed(), "window sync is stable");
+
+      S.past_days = 36500;
+      sync_now("window widened");
+      CHECK(find_event("Window old", NULL) && find_event("Window old repeat", NULL),
+            "old events arrive after widening");
+      CHECK(stub_live_count(CAL) == lbefore + 4, "no duplicates after widening (%d)",
+            stub_live_count(CAL));
+      CHECK(remote_count(P("calendar/")) == stub_live_count(CAL), "server matches J-Pilot");
+      sync_now("widened again");
+      CHECK(!log_changed(), "widened sync is stable");
    }
 
    /* 11. safety: server collection emptied -> refuse to wipe J-Pilot */
