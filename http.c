@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <signal.h>
 #include <gio/gio.h>
 #include <glib/gstdio.h>
 #include "rs.h"
@@ -238,8 +239,10 @@ RsResponse *rs_http(const RsSettings *s, const char *method, const char *url,
    char *dir = rs_state_dir();
    char *cfgpath = g_build_filename(dir, ".curlcfg-XXXXXX", NULL);
    char *hdrpath = g_build_filename(dir, ".curlhdr-XXXXXX", NULL);
-   GSubprocess *proc = NULL;
-   GBytes *in = NULL, *out = NULL, *errb = NULL;
+   char *bodypath = NULL, *bodyarg = NULL;
+   char *out = NULL, *errb = NULL;
+   int wait_status = 0;
+   struct sigaction dfl, old_chld;
    GError *err = NULL;
    int fd;
    char *hdr = NULL;
@@ -262,6 +265,19 @@ RsResponse *rs_http(const RsSettings *s, const char *method, const char *url,
    fd = g_mkstemp_full(hdrpath, O_WRONLY, 0600);
    if (fd >= 0)
       close(fd);
+   /* The request body goes through a file too, so curl needs no stdin */
+   if (body) {
+      bodypath = g_build_filename(dir, ".curlbody-XXXXXX", NULL);
+      fd = g_mkstemp_full(bodypath, O_WRONLY, 0600);
+      if (fd < 0 || write(fd, body, strlen(body)) < 0) {
+         r->error = g_strdup("cannot write request body");
+         if (fd >= 0)
+            close(fd);
+         goto done;
+      }
+      close(fd);
+      bodyarg = g_strconcat("@", bodypath, NULL);
+   }
 
    g_ptr_array_add(argv, "curl");
    g_ptr_array_add(argv, "-sS");
@@ -285,48 +301,52 @@ RsResponse *rs_http(const RsSettings *s, const char *method, const char *url,
    }
    if (body) {
       g_ptr_array_add(argv, "--data-binary");
-      g_ptr_array_add(argv, "@-");
+      g_ptr_array_add(argv, bodyarg);
    }
    g_ptr_array_add(argv, "--");
    g_ptr_array_add(argv, (char *)url);
    g_ptr_array_add(argv, NULL);
 
-   proc = g_subprocess_newv((const char *const *)argv->pdata,
-                            G_SUBPROCESS_FLAGS_STDIN_PIPE |
-                            G_SUBPROCESS_FLAGS_STDOUT_PIPE |
-                            G_SUBPROCESS_FLAGS_STDERR_PIPE, &err);
-   if (!proc) {
+   /* J-Pilot installs a SIGCHLD handler that reaps any child with
+    * waitpid(-1), and runs HotSync hooks in a forked process where GLib's
+    * worker thread is gone, so GSubprocess never sees curl exit and hangs
+    * forever.  g_spawn_sync waits for its own pid; run it with the default
+    * SIGCHLD action so the handler cannot steal the exit status. */
+   memset(&dfl, 0, sizeof dfl);
+   dfl.sa_handler = SIG_DFL;
+   sigemptyset(&dfl.sa_mask);
+   sigaction(SIGCHLD, &dfl, &old_chld);
+   if (!g_spawn_sync(NULL, (char **)argv->pdata, NULL,
+                     G_SPAWN_SEARCH_PATH | G_SPAWN_STDIN_FROM_DEV_NULL,
+                     NULL, NULL, &out, &errb, &wait_status, &err)) {
+      sigaction(SIGCHLD, &old_chld, NULL);
       r->error = g_strdup_printf("cannot run curl: %s", err->message);
       g_error_free(err);
       goto done;
    }
-   in = g_bytes_new(body ? body : "", body ? strlen(body) : 0);
-   if (!g_subprocess_communicate(proc, in, NULL, &out, &errb, &err)) {
-      r->error = g_strdup(err->message);
-      g_error_free(err);
-      goto done;
-   }
+   sigaction(SIGCHLD, &old_chld, NULL);
    if (g_file_get_contents(hdrpath, &hdr, NULL, NULL))
       parse_headers(hdr, r);
-   if (out)
-      r->body = g_strndup(g_bytes_get_data(out, NULL), g_bytes_get_size(out));
-   if (!g_subprocess_get_successful(proc) && errb) {
-      r->error = g_strstrip(g_strndup(g_bytes_get_data(errb, NULL),
-                                      g_bytes_get_size(errb)));
+   r->body = out;
+   out = NULL;
+   if (!g_spawn_check_wait_status(wait_status, NULL)) {
+      r->error = g_strstrip(g_strdup(errb && *errb ? errb : "curl failed"));
       r->status = 0;
    }
 
 done:
    g_unlink(cfgpath);
    g_unlink(hdrpath);
+   if (bodypath)
+      g_unlink(bodypath);
    g_free(cfgpath);
    g_free(hdrpath);
+   g_free(bodypath);
+   g_free(bodyarg);
    g_free(dir);
    g_free(hdr);
-   if (in) g_bytes_unref(in);
-   if (out) g_bytes_unref(out);
-   if (errb) g_bytes_unref(errb);
-   if (proc) g_object_unref(proc);
+   g_free(out);
+   g_free(errb);
    g_ptr_array_free(argv, TRUE);
    return r;
 }
