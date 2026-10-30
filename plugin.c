@@ -23,6 +23,13 @@ static void log_to_jpilot(const char *msg, void *data)
    jp_logf(JP_LOG_INFO, "%s: %s\n", PLUGIN_NAME, msg);
 }
 
+/* In the HotSync process the plugin page cannot be updated; JP_LOG_GUI
+ * goes to J-Pilot's sync window instead */
+static void log_to_sync_window(const char *msg, void *data)
+{
+   jp_logf(JP_LOG_GUI, "%s: %s\n", PLUGIN_NAME, msg);
+}
+
 static void log_to_gui(const char *msg, void *data)
 {
    log_to_jpilot(msg, data);
@@ -441,7 +448,7 @@ static void hotsync_run(const char *when)
 
    rs_settings_load(&s);
    if (s.after_hotsync) {
-      rs_set_log_func(log_to_jpilot, NULL);
+      rs_set_log_func(log_to_sync_window, NULL);
       jp_logf(JP_LOG_GUI, "%s: syncing with Radicale (%s HotSync)\n", PLUGIN_NAME, when);
       rs_sync_all(&s);
    }

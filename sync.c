@@ -281,6 +281,41 @@ static char *rec_match_key(const Kind *k, const Rec *r)
    return key;
 }
 
+/* A stricter key for spotting a second copy of a record: two events or
+ * to-dos only count as duplicates when everything the user sees matches,
+ * so a recurring "Call bank" to-do with another due date is kept. */
+static char *rec_dup_key(const Kind *k, const Rec *r)
+{
+   char *base = rec_match_key(k, r), *s, *key;
+
+   switch (k->kind) {
+    case RS_KIND_EVENT:
+      s = g_strdup_printf("%s|%04d%02d%02d%02d%02d|%d/%d/%d|%04d%02d%02d|%s", base,
+                          r->ev.end.tm_year, r->ev.end.tm_mon, r->ev.end.tm_mday,
+                          r->ev.event ? 0 : r->ev.end.tm_hour,
+                          r->ev.event ? 0 : r->ev.end.tm_min,
+                          (int)r->ev.repeatType, r->ev.repeatFrequency, r->ev.repeatForever,
+                          r->ev.repeatForever ? 0 : r->ev.repeatEnd.tm_year,
+                          r->ev.repeatForever ? 0 : r->ev.repeatEnd.tm_mon,
+                          r->ev.repeatForever ? 0 : r->ev.repeatEnd.tm_mday,
+                          r->ev.note ? r->ev.note : "");
+      break;
+    case RS_KIND_TODO:
+      s = g_strdup_printf("%s|%d|%04d%02d%02d|%d|%s", base, r->td.indefinite,
+                          r->td.indefinite ? 0 : r->td.due.tm_year,
+                          r->td.indefinite ? 0 : r->td.due.tm_mon,
+                          r->td.indefinite ? 0 : r->td.due.tm_mday,
+                          r->td.complete, r->td.note ? r->td.note : "");
+      break;
+    default:
+      return base;
+   }
+   g_free(base);
+   key = g_utf8_casefold(s, -1);
+   g_free(s);
+   return key;
+}
+
 static char *rec_title(const Kind *k, const Rec *r)
 {
    switch (k->kind) {
@@ -502,7 +537,7 @@ typedef struct {
    GHashTable *fetched;      /* href -> data */
    GList *state;
    time_t cutoff;            /* events: ignore those ending before this; 0 = all */
-   int n_up, n_down, n_del_local, n_del_remote, n_conflict, n_err;
+   int n_up, n_down, n_del_local, n_del_remote, n_conflict, n_err, n_dup;
 } Ctx;
 
 static const char *url_path(const char *url)
@@ -1276,7 +1311,49 @@ static int sync_collection(const RsSettings *s, Kind *k, const char *path)
       g_hash_table_destroy(by_key);
    }
 
-   /* 3. New in J-Pilot */
+   /* 3. New in J-Pilot.  A record that equals an item already linked on
+    * the server, or another new record in this run, is a second copy (a
+    * HotSync can bring the Palm's own copy back next to the one J-Pilot
+    * created), so it is reported instead of uploaded as a duplicate.
+    * Applies to contacts, events and to-dos alike. */
+   {
+      GHashTable *server_keys = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+      /* keys come from the J-Pilot side of each link: a key rebuilt from
+       * the server text can differ after the iCalendar/vCard round trip,
+       * and the copy would then be uploaded on the next sync */
+      g_hash_table_iter_init(&it, c.locals);
+      while (g_hash_table_iter_next(&it, &key, &val)) {
+         Local *lo = val;
+         Rec r;
+         if (!lo->linked || rec_unpack(k, lo->br, &r) != 0)
+            continue;
+         g_hash_table_add(server_keys, rec_dup_key(k, &r));
+         rec_free(k, &r);
+      }
+      g_hash_table_iter_init(&it, c.locals);
+      while (g_hash_table_iter_next(&it, &key, &val)) {
+         Local *lo = val;
+         Rec r;
+         if (lo->linked || lo->old || rec_unpack(k, lo->br, &r) != 0)
+            continue;
+         {
+            char *mk = rec_dup_key(k, &r);
+            if (g_hash_table_contains(server_keys, mk)) {
+               char *title = rec_title(k, &r);
+               rs_log("%s: \"%s\" duplicates another record already synced; "
+                      "not uploading this copy (duplicate in J-Pilot?)", k->label, title);
+               g_free(title);
+               lo->linked = TRUE;
+               c.n_dup++;
+               g_free(mk);
+            } else {
+               g_hash_table_add(server_keys, mk);   /* first copy uploads */
+            }
+         }
+         rec_free(k, &r);
+      }
+      g_hash_table_destroy(server_keys);
+   }
    g_hash_table_iter_init(&it, c.locals);
    while (g_hash_table_iter_next(&it, &key, &val)) {
       Local *lo = val;
@@ -1318,9 +1395,9 @@ static int sync_collection(const RsSettings *s, Kind *k, const char *path)
 
    state_save(spath, c.state);
    rs_log("%s: %d sent, %d received, %d deleted here, %d deleted on server, "
-          "%d conflicts, %d errors",
+          "%d conflicts, %d errors, %d duplicates skipped",
           k->label, c.n_up, c.n_down, c.n_del_local, c.n_del_remote,
-          c.n_conflict, c.n_err);
+          c.n_conflict, c.n_err, c.n_dup);
 
 out:
    g_list_free_full(c.state, (GDestroyNotify)state_entry_free);

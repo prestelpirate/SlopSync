@@ -36,11 +36,35 @@ static void capture(const char *msg, void *d)
    g_string_append_c(logbuf, '\n');
 }
 
+
+/* duplicates the last sync skipped for one kind ("Calendar", ...) */
+static int dups_skipped(const char *label)
+{
+   const char *p = strstr(logbuf->str, label);
+   int n = 0;
+   while (p && (p = strstr(p, label))) {
+      const char *eol = strchr(p, '\n'), *d = strstr(p, " errors, ");
+      if (d && (!eol || d < eol))
+         sscanf(d, " errors, %d duplicates skipped", &n);
+      p = eol;
+   }
+   return n;
+}
+
+/* records J-Pilot holds once duplicates are left out: what the server has */
+static int dup_cal, dup_con, dup_todo;
+#define LIVE_CAL (stub_live_count(CAL) - dup_cal)
+
+/* A record whose uploaded twin goes away becomes the uploaded copy, so
+ * the counts are taken again after every sync */
 static void sync_now(const char *what)
 {
    g_string_truncate(logbuf, 0);
    rs_sync_all(&S);
    printf("---- sync: %s\n%s", what, logbuf->str);
+   dup_cal = dups_skipped("Calendar: ");
+   dup_con = dups_skipped("Contacts: ");
+   dup_todo = dups_skipped("To-dos: ");
 }
 
 static gboolean log_has(const char *s)
@@ -199,6 +223,34 @@ static void local_modify_event(buf_rec *b, const char *new_desc)
    jp_pc_write(CAL, &nb);
    free_CalendarEvent(&ev);
    pi_buffer_free(pb);
+   pi_buffer_free(out);
+}
+
+/* add a J-Pilot record the way the GUI does: a new PC record, id 0 */
+static void local_add(const char *dbname, pi_buffer_t *out)
+{
+   buf_rec nb;
+   memset(&nb, 0, sizeof(nb));
+   nb.rt = NEW_PC_REC;
+   nb.buf = out->data;
+   nb.size = out->used;
+   jp_pc_write(dbname, &nb);
+}
+
+static void local_add_todo(const char *desc, int due_mday)
+{
+   struct ToDo td;
+   pi_buffer_t *out = pi_buffer_new(0xffff);
+   memset(&td, 0, sizeof(td));
+   td.indefinite = 0;
+   td.due.tm_year = 126;
+   td.due.tm_mon = 10;
+   td.due.tm_mday = due_mday;
+   td.priority = 1;
+   td.description = (char *)desc;
+   td.note = "";
+   pack_ToDo(&td, out, todo_v1);
+   local_add(TODO, out);
    pi_buffer_free(out);
 }
 
@@ -372,12 +424,14 @@ int main(int argc, char **argv)
 
    /* 1. first sync uploads everything */
    sync_now("initial");
-   CHECK(remote_count(P("calendar/")) == stub_live_count(CAL),
-         "all %d events on server", stub_live_count(CAL));
-   CHECK(remote_count(P("contacts/")) == stub_live_count(CON),
-         "all %d contacts on server", stub_live_count(CON));
-   CHECK(remote_count(P("tasks/")) == stub_live_count(TODO),
-         "all %d to-dos on server", stub_live_count(TODO));
+   CHECK(remote_count(P("calendar/")) == LIVE_CAL,
+         "all %d events on server (%d duplicates left out)", LIVE_CAL, dup_cal);
+   CHECK(remote_count(P("contacts/")) == stub_live_count(CON) - dup_con,
+         "all %d contacts on server (%d duplicates left out)",
+         stub_live_count(CON) - dup_con, dup_con);
+   CHECK(remote_count(P("tasks/")) == stub_live_count(TODO) - dup_todo,
+         "all %d to-dos on server (%d duplicates left out)",
+         stub_live_count(TODO) - dup_todo, dup_todo);
 
    /* 2. nothing changed -> nothing happens */
    sync_now("no changes");
@@ -389,7 +443,7 @@ int main(int argc, char **argv)
    sync_now("local edit");
    href = remote_find(P("calendar/"), "SUMMARY:Changed in J-Pilot", &body);
    CHECK(href != NULL, "edited event uploaded");
-   CHECK(remote_count(P("calendar/")) == stub_live_count(CAL), "no duplicate after edit");
+   CHECK(remote_count(P("calendar/")) == LIVE_CAL, "no duplicate after edit");
 
    /* 4. server change comes down (and keeps unknown properties) */
    {
@@ -455,7 +509,7 @@ int main(int argc, char **argv)
    body = remote_get(P("calendar/server-new-1.ics"), NULL);
    CHECK(body && strstr(body, "SUMMARY:Choir practice (moved)") && strstr(body, "UID:server-new-1"),
          "same server object updated");
-   CHECK(remote_count(P("calendar/")) == stub_live_count(CAL), "no duplicates after PC edit");
+   CHECK(remote_count(P("calendar/")) == LIVE_CAL, "no duplicates after PC edit");
 
    /* 6. HotSync gives the new record a Palm id: must relink, not duplicate */
    stub_hotsync(CAL);
@@ -463,7 +517,7 @@ int main(int argc, char **argv)
    stub_hotsync(TODO);
    sync_now("after hotsync");
    CHECK(!log_changed(), "ids changed by HotSync are relinked");
-   CHECK(remote_count(P("calendar/")) == stub_live_count(CAL), "still no duplicates");
+   CHECK(remote_count(P("calendar/")) == LIVE_CAL, "still no duplicates");
 
    /* 7. deletions both ways */
    b = find_event("Choir practice", NULL);
@@ -475,7 +529,7 @@ int main(int argc, char **argv)
    remote_delete(href);
    sync_now("server delete");
    CHECK(!find_event("Edited again", NULL), "server delete removed it locally");
-   CHECK(remote_count(P("calendar/")) == stub_live_count(CAL), "counts match");
+   CHECK(remote_count(P("calendar/")) == LIVE_CAL, "counts match");
 
    /* 8. conflict, server wins by default */
    b = live_rec(CAL, 3);
@@ -639,9 +693,62 @@ int main(int argc, char **argv)
             "old events arrive after widening");
       CHECK(stub_live_count(CAL) == lbefore + 4, "no duplicates after widening (%d)",
             stub_live_count(CAL));
-      CHECK(remote_count(P("calendar/")) == stub_live_count(CAL), "server matches J-Pilot");
+      CHECK(remote_count(P("calendar/")) == LIVE_CAL, "server matches J-Pilot");
       sync_now("widened again");
       CHECK(!log_changed(), "widened sync is stable");
+   }
+
+   /* 10b. duplicates in J-Pilot are not uploaded twice */
+   {
+      struct CalendarEvent ev;
+      pi_buffer_t *out;
+      int rcal = remote_count(P("calendar/")), rtodo;
+      buf_rec *b = live_rec(CAL, 0);
+      pi_buffer_t *pb = pi_buffer_new(b->size);
+
+      /* exact copy of an event that is already synced */
+      out = pi_buffer_new(b->size);
+      pi_buffer_append(out, b->buf, b->size);
+      local_add(CAL, out);
+      pi_buffer_free(out);
+      sync_now("duplicate event");
+      CHECK(remote_count(P("calendar/")) == rcal && log_has("duplicates another record"),
+            "copy of a synced event is not uploaded (%d on server, was %d)",
+            remote_count(P("calendar/")), rcal);
+
+      /* same title on another day is a different event */
+      pi_buffer_append(pb, b->buf, b->size);
+      memset(&ev, 0, sizeof(ev));
+      unpack_CalendarEvent(&ev, pb, calendar_v1);
+      ev.begin.tm_mday = ev.begin.tm_mday == 1 ? 2 : 1;
+      ev.end.tm_mday = ev.begin.tm_mday;
+      ev.repeatType = calendarRepeatNone;
+      out = pi_buffer_new(0xffff);
+      pack_CalendarEvent(&ev, out, calendar_v1);
+      local_add(CAL, out);
+      local_add(CAL, out);   /* and twice in one run: one upload */
+      pi_buffer_free(out);
+      free_CalendarEvent(&ev);
+      pi_buffer_free(pb);
+      sync_now("same title, other day, twice");
+      CHECK(remote_count(P("calendar/")) == rcal + 1,
+            "other-day event uploaded once (%d on server, was %d)",
+            remote_count(P("calendar/")), rcal);
+
+      /* to-dos: identical pair uploads once, other due date is kept */
+      rtodo = remote_count(P("tasks/"));
+      local_add_todo("Dup test to-do", 3);
+      local_add_todo("Dup test to-do", 3);
+      local_add_todo("Dup test to-do", 4);
+      sync_now("to-do duplicates");
+      CHECK(remote_count(P("tasks/")) == rtodo + 2,
+            "identical to-dos upload once, other due date kept (%d on server, was %d)",
+            remote_count(P("tasks/")), rtodo);
+      local_add_todo("Dup test to-do", 3);
+      sync_now("to-do copy of a synced one");
+      CHECK(remote_count(P("tasks/")) == rtodo + 2, "copy of a synced to-do is not uploaded");
+      sync_now("after duplicates");
+      CHECK(!log_changed(), "sync with skipped duplicates is stable");
    }
 
    /* 11. safety: server collection emptied -> refuse to wipe J-Pilot */
