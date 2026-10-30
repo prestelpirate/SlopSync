@@ -94,6 +94,16 @@ void rs_settings_load(RsSettings *s)
    s->insecure_tls = kf_bool(kf, "allow_insecure_tls", FALSE);
    s->conflict = kf_bool(kf, "palm_wins_conflicts", FALSE) ? RS_PREFER_PALM
                                                           : RS_PREFER_SERVER;
+   {
+      GError *err = NULL;
+      s->past_days = g_key_file_get_integer(kf, "radicale", "past_event_days", &err);
+      if (err) {
+         g_error_free(err);
+         s->past_days = 14;
+      }
+      if (s->past_days < 0)
+         s->past_days = 0;
+   }
    g_key_file_free(kf);
    g_free(f);
 }
@@ -118,6 +128,7 @@ int rs_settings_save(const RsSettings *s)
    g_key_file_set_boolean(kf, "radicale", "allow_insecure_tls", s->insecure_tls);
    g_key_file_set_boolean(kf, "radicale", "palm_wins_conflicts",
                           s->conflict == RS_PREFER_PALM);
+   g_key_file_set_integer(kf, "radicale", "past_event_days", s->past_days);
    if (!g_key_file_save_to_file(kf, f, &err)) {
       rs_log("Could not save settings: %s", err->message);
       g_error_free(err);

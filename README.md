@@ -16,7 +16,9 @@ the J-Pilot 2.1.0 source tree (for `libplugin.h`; default
     make                 # builds libradicalesync.so
     make install         # copies it to ~/.jpilot/plugins/
 
-Restart J-Pilot. The plugin then appears under **Plugins → Radicale Sync**.
+Restart J-Pilot. The plugin then appears under **Plugins → Radicale Sync**. It opens in
+J-Pilot's main area and shows the server, the **Sync now** and **Settings…** buttons,
+and the sync log.
 
 ## Setup
 
@@ -24,9 +26,13 @@ Restart J-Pilot. The plugin then appears under **Plugins → Radicale Sync**.
 2. Enter the Radicale address (for example `http://server:5232/`), your username and password.
 3. Click **Find collections**. Then choose the calendar, the to-do calendar and the address book.
    The calendar and the to-dos can share one collection.
-4. Choose what happens when an item changed on both sides. Optionally enable
+4. Set **Sync past events from the last … days** (default 14). Calendar events
+   that ended longer ago are neither sent nor received. They are also never deleted
+   because of this limit. Current and future events, and repeating events without an
+   end date, are always synced. To-dos and contacts are not affected.
+5. Choose what happens when an item changed on both sides. Optionally enable
    **Sync with Radicale automatically during each HotSync**.
-5. Click **Save**, then **Sync now**.
+6. Click **Save**, then **Sync now**.
 
 ## How it syncs
 
