@@ -1,5 +1,5 @@
 # radicalesync - J-Pilot plugin for two-way sync with Radicale
-JPILOT_SRC ?= $(HOME)/jpilot
+JPILOT_SRC ?= $(HOME)/Downloads/jpilot-2.1.0
 PLUGIN_DIR ?= $(HOME)/.jpilot/plugins
 
 PKGS    = gtk+-3.0 gio-2.0 libical

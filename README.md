@@ -10,7 +10,8 @@ Two-way sync of J-Pilot's **calendar**, **contacts** and **to-dos** with a
 ## Build and install
 
 Needs: `libgtk-3-dev`, `libical-dev`, `libpisock-dev`, the `curl` program and
-the J-Pilot source tree (for `libplugin.h`; default `~/jpilot`).
+the J-Pilot 2.1.0 source tree (for `libplugin.h`; default
+`~/Downloads/jpilot-2.1.0`, override with `make JPILOT_SRC=...`).
 
     make                 # builds libradicalesync.so
     make install         # copies it to ~/.jpilot/plugins/
@@ -53,6 +54,12 @@ Restart J-Pilot. The plugin then appears under **Plugins → Radicale Sync**.
 * `*.state.d/` holds the last copy of each server object, used for merging.
 
 To force a fresh first sync of a collection, delete its `.state` file and `.state.d` folder.
+
+## SQLite storage
+
+J-Pilot 2.1.0 can keep its data in SQLite (`jpilot -S`). The plugin API only
+reads and writes the standard `.pdb`/`.pc3` files, so the plugin refuses to
+sync in that mode and says so in the log.
 
 ## Limits of the Palm format
 
