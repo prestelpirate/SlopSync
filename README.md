@@ -1,11 +1,26 @@
-<<<<<<< HEAD
-# SlopSync
-j-pilot plugin: Two-way sync of J-Pilot's **calendar**, **contacts** and **to-dos** with a Radicale CalDAV/CardDAV server.
-=======
-# Radicale Sync – J-Pilot plugin
+# SlopSync – J-Pilot plugin
+
 
 Two-way sync of J-Pilot's **calendar**, **contacts** and **to-dos** with a
 [Radicale](https://radicale.org) CalDAV/CardDAV server.
+
+This has been thrown together by an AI agent, against the j-pilot-2.1.0 recent build. It has been tested against Radicale, and probably will work against other CalDAV/WebDAV endpoints, but I've not tested anything else.
+
+## Something doesn't work
+
+Well, that's the advantage of vibe coding churning out slop, isn't it? Just feed the source into your local AI coding agent and tell it to fix it.
+
+## I'd like see X, Y, and Z features added
+
+That's nice. See previous answer.
+
+## Is this safe?
+
+Is anything really safe today? I mean, its not deleted any of my data, or caused any massive sync fuck-ups, so ...... you're probably good.
+
+## I lost all my data!
+
+That's terrible, you should write a blog on Tumblr.
 
 ## Build and install
 
@@ -87,4 +102,3 @@ for J-Pilot's database functions and is seeded from real `.pdb` files:
 
 The server must have empty collections `/USER/calendar/` (events), `/USER/tasks/`
 (to-dos) and `/USER/contacts/` (address book).
->>>>>>> 15f0d10 (Radicale Sync plugin for J-Pilot: two-way CalDAV/CardDAV sync)
